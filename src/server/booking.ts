@@ -45,22 +45,24 @@ const burstRequestIntervalMs = 1100;
 const burstTimeoutMs = 10 * 60_000;
 const prelockTimeoutMs = 90_000;
 
-// 预约路径发出的所有馆方请求共享一个节拍器：任意两次请求的实际间隔不低于 intervalMs。
+// 同一账户（同一 LibraryClient）的预约请求共享一个节拍器：任意两次请求的实际间隔不低于 intervalMs。
+// 多账户各自独立计时，20:00 时可同时抢座，互不拖慢。
 export const pacing = {
   intervalMs: burstRequestIntervalMs,
-  // Vitest may reuse the module instance across files; clear the shared request slot between suites.
-  reset() { nextRequestSlot = 0; },
+  // Vitest may reuse the module instance across files; clear the request slots between suites.
+  reset() { requestSlots = new WeakMap(); },
 };
-let nextRequestSlot = 0;
+let requestSlots = new WeakMap<object, number>();
 
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-async function paced<T>(fn: () => Promise<T>): Promise<T> {
+async function paced<T>(client: object, fn: () => Promise<T>): Promise<T> {
   const now = Date.now();
+  const nextRequestSlot = requestSlots.get(client) || 0;
   const wait = Math.max(0, nextRequestSlot - now);
-  nextRequestSlot = Math.max(now, nextRequestSlot) + pacing.intervalMs;
+  requestSlots.set(client, Math.max(now, nextRequestSlot) + pacing.intervalMs);
   if (wait > 0) await sleep(wait);
   return fn();
 }
@@ -113,7 +115,7 @@ function memberBegin(plan: BookingPlan): Date | undefined {
 // 幂等依据：馆方预约列表里已存在同一开始时间的预约时，不再重复提交。
 async function existingBookingForBegin(client: LibraryClient, begin: Date): Promise<Record<string, unknown> | undefined> {
   try {
-    const items = await paced(() => client.bookings());
+    const items = await paced(client, () => client.bookings());
     const target = Math.floor(begin.getTime() / 1000);
     return items.find((item) => Number(item.time || 0) === target);
   } catch {
@@ -123,7 +125,7 @@ async function existingBookingForBegin(client: LibraryClient, begin: Date): Prom
 
 async function bookedBeginTimes(client: LibraryClient): Promise<Set<number>> {
   try {
-    const items = await paced(() => client.bookings());
+    const items = await paced(client, () => client.bookings());
     return new Set(items.map((item) => Number(item.time || 0)));
   } catch {
     return new Set();
@@ -132,7 +134,7 @@ async function bookedBeginTimes(client: LibraryClient): Promise<Set<number>> {
 
 async function releaseLocks(client: LibraryClient): Promise<void> {
   try {
-    await paced(() => client.unlockAllSeats());
+    await paced(client, () => client.unlockAllSeats());
   } catch (error) {
     if (error instanceof AuthenticationExpiredError) throw error;
     // 释放失败不能掩盖原始 lockSeats 失败；下一次尝试仍会再次释放。
@@ -144,7 +146,7 @@ type ResolvedSeat = { seatId: string; seatNum: string };
 // 预锁优先只锁主座位。主座位只是“未开放”等原因被拒时应原座位重试，
 // 不能在开放前退到 fallback，否则 20:00 反而会订到非首选座位。
 async function resolvePrimarySeat(client: LibraryClient, plan: BookingPlan, begin: Date): Promise<ResolvedSeat> {
-  const floors = await paced(() => client.floors(plan.roomQuery, begin, plan.durationHours));
+  const floors = await paced(client, () => client.floors(plan.roomQuery, begin, plan.durationHours));
   const floor = floors.find((item) => {
     const map = (item as Record<string, unknown>).seatMap as Record<string, unknown> | undefined;
     return String(((map?.info as Record<string, unknown> | undefined)?.id || "")) === String(plan.floorId);
@@ -167,7 +169,7 @@ async function bookSeatWithConfirmation(
   seatNum: string,
 ): Promise<BookingMemberResult> {
   try {
-    const response = await paced(() => client.bookSeat(seatId, begin, plan.durationHours));
+    const response = await paced(client, () => client.bookSeat(seatId, begin, plan.durationHours));
     if (bookingSucceeded(response)) return { planId: plan.id, seatNum, success: true, message: "预约成功" };
     const message = responseMessage(response) || "预约失败";
     // 服务器已受理但响应被判定失败时，先做幂等确认，避免重复提交和误报。
@@ -208,7 +210,7 @@ async function executePlan(
 
   let floors: unknown[];
   try {
-    floors = await paced(() => client.floors(plan.roomQuery, begin, plan.durationHours));
+    floors = await paced(client, () => client.floors(plan.roomQuery, begin, plan.durationHours));
   } catch (error) {
     return { planId: plan.id, success: false, message: `房间或座位查询失败: ${String(error)}` };
   }
@@ -245,7 +247,7 @@ async function lockAllMembersOnce(
       if (booked.has(beginSeconds)) continue;
 
       const seat = await resolvePrimarySeat(client, plan, begin);
-      const response = await paced(() => client.lockSeat(seat.seatId, begin, plan.durationHours));
+      const response = await paced(client, () => client.lockSeat(seat.seatId, begin, plan.durationHours));
       if (!lockSucceeded(response)) {
         const message = responseMessage(response) || "预锁失败";
         await releaseLocks(client);
@@ -282,14 +284,22 @@ export class BookingExecutor {
   /** 当前预约日的预锁；19:59 建立后由 20:00 的预约 burst 消费。 */
   private lockedSeats: BookingLock[] = [];
 
-  constructor(private readonly client: LibraryClient, private readonly pause: (ms: number) => Promise<void> = sleep) {}
+  constructor(
+    private readonly client: LibraryClient,
+    private readonly pause: (ms: number) => Promise<void> = sleep,
+    private readonly accountId = "default",
+  ) {}
+
+  private audit(event: string, payload: Record<string, unknown>): void {
+    writeAudit(event, payload, this.accountId);
+  }
 
   // 单次执行：手动触发或 burst 中的一次尝试。幂等——预约列表里已有的时段直接跳过。
   async run(dryRun = false, options: { audit?: boolean } = {}): Promise<BookingRunResult> {
-    const release = tryAcquireJobLock("booking");
+    const release = tryAcquireJobLock("booking", this.accountId);
     if (!release) return { success: false, message: "已有任务正在运行", members: [] };
     try {
-      const enabled = listPlanItems().find((item) => item.enabled);
+      const enabled = listPlanItems(this.accountId).find((item) => item.enabled);
       if (!enabled) return { success: false, message: "没有启用的预约方案", members: [] };
       const begins = dryRun ? new Set<number>() : await bookedBeginTimes(this.client);
       const results: BookingMemberResult[] = [];
@@ -305,13 +315,13 @@ export class BookingExecutor {
           result = await executePlan(this.client, plan, begin, dryRun, preferred);
         }
         results.push(result);
-        writeAudit("booking_member_finished", { planId: plan.id, success: result.success, seatNum: result.seatNum, message: result.message });
+        this.audit("booking_member_finished", { planId: plan.id, success: result.success, seatNum: result.seatNum, message: result.message });
       }
       const success = results.length > 0 && results.every((result) => result.success);
       const message = dryRun ? "预约预演完成，未提交预约请求" : success ? "预约任务完成" : `预约失败：${results.map((result) => result.message).join("；")}`;
       const result: BookingRunResult = { planId: enabled.id, kind: enabled.kind, success, message, members: results };
       if (options?.audit !== false) {
-        writeAudit("booking_run_finished", { planId: enabled.id, kind: enabled.kind, success, members: results.length, message });
+        this.audit("booking_run_finished", { planId: enabled.id, kind: enabled.kind, success, members: results.length, message });
       }
       if (success) this.lockedSeats = [];
       return result;
@@ -329,7 +339,7 @@ export class BookingExecutor {
       const terminal = result.members.some((member) => member.terminal);
       if (result.success || terminal || Date.now() >= deadline) {
         // burst 只产生一条结果审计，避免逐次重试刷屏通知。
-        writeAudit("booking_run_finished", { planId: result.planId, kind: result.kind, success: result.success, members: result.members.length, message: result.message });
+        this.audit("booking_run_finished", { planId: result.planId, kind: result.kind, success: result.success, members: result.members.length, message: result.message });
         if (result.success || terminal) this.lockedSeats = [];
         return result;
       }
@@ -339,7 +349,7 @@ export class BookingExecutor {
 
   // 预锁窗口：19:59 开始，成功后保持锁；20:00 的 runBurst 会用同一座位直接转正式预约。
   async lockBurst(options: { intervalMs?: number; timeoutMs?: number; deadlineAt?: Date } = {}): Promise<BookingLockResult> {
-    const enabled = listPlanItems().find((item) => item.enabled);
+    const enabled = listPlanItems(this.accountId).find((item) => item.enabled);
     if (!enabled) return { success: false, message: "没有启用的预约方案", locks: [] };
     const intervalMs = options.intervalMs ?? burstRequestIntervalMs;
     const deadline = options.deadlineAt?.getTime() ?? Date.now() + (options.timeoutMs ?? prelockTimeoutMs);
@@ -362,7 +372,7 @@ export class BookingExecutor {
 
     if (!last) last = { planId: enabled.id, kind: enabled.kind, success: false, message: "预锁未执行", locks: [] };
     this.lockedSeats = last.success ? last.locks : [];
-    writeAudit("booking_prelock_finished", {
+    this.audit("booking_prelock_finished", {
       planId: last.planId,
       kind: last.kind,
       success: last.success,

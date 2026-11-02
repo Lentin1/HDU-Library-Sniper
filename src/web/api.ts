@@ -2,6 +2,7 @@ import { z } from "zod";
 import { isTauri } from "./tauri";
 import { useAppStore } from "./store";
 import type {
+  AccountSummary,
   AuditEvent,
   Booking,
   BookingPlan,
@@ -28,7 +29,7 @@ export function resolveApiBase(): string {
   return "";
 }
 
-const sessionSchema = z.object({ authenticated: z.boolean(), uid: z.string().optional(), name: z.string().optional(), refreshing: z.boolean(), lastError: z.string().optional() });
+const sessionSchema = z.object({ authenticated: z.boolean(), accountId: z.string().optional(), uid: z.string().optional(), name: z.string().optional(), refreshing: z.boolean(), lastError: z.string().optional() });
 const checkinSchema = z.object({ enabled: z.boolean(), consentVersion: z.string(), consentedAt: z.string().optional(), lastAttemptAt: z.string().optional(), lastSuccessAt: z.string().optional(), lastMessage: z.string().optional() });
 
 async function call<T>(path: string, init?: RequestInit, schema?: z.ZodType<T>): Promise<T> {
@@ -39,7 +40,9 @@ async function call<T>(path: string, init?: RequestInit, schema?: z.ZodType<T>):
     const fetcher = isTauri()
       ? (await import("@tauri-apps/plugin-http")).fetch
       : globalThis.fetch.bind(globalThis);
-    response = await fetcher(url, { ...init, headers: { "Content-Type": "application/json", ...(init?.headers || {}) } });
+    const accountId = useAppStore.getState().currentAccountId;
+    const accountHeader: Record<string, string> = accountId ? { "X-Account-Id": accountId } : {};
+    response = await fetcher(url, { ...init, headers: { "Content-Type": "application/json", ...accountHeader, ...(init?.headers || {}) } });
   } catch (cause) {
     if (cause instanceof DOMException && cause.name === "AbortError") throw cause;
     if (isTauri()) {
@@ -74,7 +77,9 @@ async function call<T>(path: string, init?: RequestInit, schema?: z.ZodType<T>):
 
 export const api = {
   session: () => call<SessionStatus>("/api/session", undefined, sessionSchema),
-  login: (studentId: string, password: string) => call<{ success: boolean; message: string }>("/api/session/login", { method: "POST", body: JSON.stringify({ studentId, password }) }),
+  accounts: () => call<{ accounts: AccountSummary[] }>("/api/accounts"),
+  removeAccount: (id: string) => call<{ success: boolean }>(`/api/accounts/${encodeURIComponent(id)}`, { method: "DELETE" }),
+  login: (studentId: string, password: string) => call<{ success: boolean; message: string; accountId?: string; session?: SessionStatus }>("/api/session/login", { method: "POST", body: JSON.stringify({ studentId, password }) }),
   logout: () => call<{ success: boolean }>("/api/session/logout", { method: "POST" }),
   qrStart: () => call<QrLoginStart>("/api/session/qr", { method: "POST" }),
   qrStatus: (uuid: string) => call<QrLoginStatus>(`/api/session/qr/${encodeURIComponent(uuid)}/status`),
@@ -95,6 +100,7 @@ export const api = {
   floors: (roomQuery: string, roomType?: string) => call<{ options: FloorOption[]; range?: BookingRange }>(`/api/catalog/floors?roomQuery=${encodeURIComponent(roomQuery)}&roomType=${encodeURIComponent(roomType || "")}`),
   durations: (roomQuery: string, startHour: number, roomType?: string) => call<DurationOptions>(`/api/catalog/durations?roomQuery=${encodeURIComponent(roomQuery)}&roomType=${encodeURIComponent(roomType || "")}&startHour=${startHour}`),
   audit: (limit = 20) => call<{ events: AuditEvent[] }>(`/api/audit?limit=${limit}`),
+  auditAll: (limit = 50) => call<{ events: AuditEvent[] }>(`/api/audit?scope=all&limit=${limit}`),
   checkinStatus: () => call<CheckInStatus>("/api/checkin", undefined, checkinSchema),
   setCheckin: (enabled: boolean, agreed = false) => call<CheckInStatus>(`/api/checkin/${enabled ? "enable" : "disable"}`, { method: "POST", body: JSON.stringify({ agreed }) }, checkinSchema),
   clashDirectStatus: () => call<ClashDirectStatus>("/api/clash/direct"),

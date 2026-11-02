@@ -1,6 +1,6 @@
 import { createCipheriv } from "node:crypto";
 import { CookieJar } from "./cookies";
-import { db } from "./db";
+import { clearAccountSession, getAccount, updateAccountCookies, upsertAccountLogin } from "./db";
 import { LibraryClient } from "./library";
 import type { SessionStatus } from "../shared/types";
 
@@ -58,16 +58,17 @@ export class AuthService {
   private qrSessions = new Map<string, QrSessionState>();
   readonly client: LibraryClient;
 
-  constructor() {
-    const row = db.query("SELECT cookies, uid, name, student_id, password FROM session WHERE id = 1").get() as { cookies?: string; uid?: string; name?: string; student_id?: string; password?: string } | null;
-    if (row?.student_id && row.password) this.credentials = { studentId: row.student_id, password: row.password };
+  /**
+   * 每个 AuthService 对应一个图书馆账户（accounts 表中的一行）。
+   * 新增账户时会先以临时 id 构造，登录成功后才写入数据库。
+   */
+  constructor(readonly accountId = "default") {
+    const row = getAccount(accountId);
+    if (row?.studentId && row.password) this.credentials = { studentId: row.studentId, password: row.password };
     const jar = new CookieJar(row?.cookies ? JSON.parse(row.cookies) : []);
     this.client = new LibraryClient({
       jar,
-      onJarChange: async (next) => {
-        db.query("INSERT INTO session(id,cookies,uid,name,updated_at) VALUES(1,?1,?2,?3,?4) ON CONFLICT(id) DO UPDATE SET cookies=excluded.cookies,updated_at=excluded.updated_at")
-          .run(JSON.stringify(next.all), this.client.uid, this.client.name, new Date().toISOString());
-      },
+      onJarChange: async (next) => updateAccountCookies(this.accountId, JSON.stringify(next.all)),
       onAuthExpired: async () => this.refresh(),
     });
     this.client.uid = row?.uid || "";
@@ -75,7 +76,29 @@ export class AuthService {
   }
 
   get authenticated(): boolean { return Boolean(this.client.uid); }
-  status(): SessionStatus { return { authenticated: this.authenticated, uid: this.client.uid || undefined, name: this.client.name || undefined, refreshing: false }; }
+  get studentId(): string | undefined { return this.credentials?.studentId || getAccount(this.accountId)?.studentId || undefined; }
+  status(): SessionStatus { return { authenticated: this.authenticated, accountId: this.accountId, uid: this.client.uid || undefined, name: this.client.name || undefined, refreshing: false }; }
+
+  /** 把另一个（临时）AuthService 的登录结果合并到本账户：同一学号重复添加时复用原账户。 */
+  adopt(other: AuthService): void {
+    this.client.jar.clear();
+    for (const cookie of other.client.jar.all) this.client.jar.add(cookie);
+    this.client.uid = other.client.uid;
+    this.client.name = other.client.name;
+    if (other.credentials) this.credentials = other.credentials;
+    this.persistLogin();
+  }
+
+  private persistLogin(): void {
+    const row = getAccount(this.accountId);
+    upsertAccountLogin(this.accountId, {
+      uid: this.client.uid,
+      name: this.client.name,
+      studentId: this.credentials?.studentId || row?.studentId || "",
+      password: this.credentials?.password || row?.password || "",
+      cookies: JSON.stringify(this.client.jar.all),
+    });
+  }
 
   private async followRedirects(url: string, init: RequestInit = {}): Promise<Response> {
     let currentUrl = url;
@@ -138,8 +161,7 @@ export class AuthService {
       }
       await this.client.validate();
       if (!this.client.uid) return { success: false, message: "Cookie 无效或登录态未生效" };
-      await db.query("INSERT INTO session(id,cookies,uid,name,student_id,password,updated_at) VALUES(1,?1,?2,?3,?4,?5,?6) ON CONFLICT(id) DO UPDATE SET cookies=excluded.cookies,uid=excluded.uid,name=excluded.name,student_id=excluded.student_id,password=excluded.password,updated_at=excluded.updated_at")
-        .run(JSON.stringify(this.client.jar.all), this.client.uid, this.client.name, studentId, password, new Date().toISOString());
+      this.persistLogin();
       return { success: true, message: `认证成功${this.client.name ? `：${this.client.name}` : ""}` };
     } catch (error) {
       return { success: false, message: `登录请求失败：${error instanceof Error ? error.message : String(error)}` };
@@ -238,17 +260,7 @@ export class AuthService {
     }
     await this.client.validate();
     if (!this.client.uid) throw new Error("扫码登录后 Cookie 无效");
-
-    const row = db.query("SELECT student_id, password FROM session WHERE id = 1").get() as { student_id?: string; password?: string } | null;
-    await db.query("INSERT INTO session(id,cookies,uid,name,student_id,password,updated_at) VALUES(1,?1,?2,?3,?4,?5,?6) ON CONFLICT(id) DO UPDATE SET cookies=excluded.cookies,uid=excluded.uid,name=excluded.name,student_id=excluded.student_id,password=excluded.password,updated_at=excluded.updated_at")
-      .run(
-        JSON.stringify(this.client.jar.all),
-        this.client.uid,
-        this.client.name,
-        row?.student_id || "",
-        row?.password || "",
-        new Date().toISOString(),
-      );
+    this.persistLogin();
   }
 
   pollQrLogin(uuid: string): QrLoginStatusResult {
@@ -332,8 +344,7 @@ export class AuthService {
     this.client.uid = "";
     this.client.name = "";
     this.client.jar.clear();
-    db.query("UPDATE session SET uid = '', name = '', cookies = '[]', updated_at = ?1 WHERE id = 1")
-      .run(new Date().toISOString());
+    clearAccountSession(this.accountId);
   }
 
   async refresh(): Promise<boolean> {

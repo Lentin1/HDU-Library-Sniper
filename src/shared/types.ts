@@ -49,6 +49,7 @@ export type Booking = {
 
 export type SessionStatus = {
   authenticated: boolean;
+  accountId?: string;
   uid?: string;
   name?: string;
   refreshing: boolean;
@@ -106,6 +107,20 @@ export type AuditEvent = {
   event: string;
   payload: Record<string, unknown>;
   createdAt: string;
+  accountId?: string;
+  accountName?: string;
+};
+
+export type AccountSummary = {
+  id: string;
+  uid?: string;
+  name?: string;
+  studentId?: string;
+  authenticated: boolean;
+  state: RuntimeStatus["state"];
+  lastMessage?: string;
+  autoCheckIn: boolean;
+  enabledPlan?: string;
 };
 
 export const weekdayLabels: Record<Weekday, string> = {

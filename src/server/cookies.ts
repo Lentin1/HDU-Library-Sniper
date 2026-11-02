@@ -65,6 +65,12 @@ export class CookieJar {
     this.cookies = [];
   }
 
+  add(cookie: StoredCookie): void {
+    this.cookies = this.cookies.filter((item) =>
+      !(item.name === cookie.name && item.domain === cookie.domain && item.path === cookie.path));
+    this.cookies.push(cookie);
+  }
+
   merge(headers: Headers, requestUrl: string): boolean {
     const setCookies = typeof headers.getSetCookie === "function"
       ? headers.getSetCookie()

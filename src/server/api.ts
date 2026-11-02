@@ -1,28 +1,35 @@
-import { AuthService } from "./auth";
+import type { AccountManager } from "./accounts";
 import { createGroup, createPlan, deleteGroup, deletePlan, enablePlanItem, getPlanItem, listPlanItems, referencedPlanIds, updateGroup, updatePlan } from "./plans";
-import { Scheduler } from "./scheduler";
 import * as catalog from "./catalog";
 import { getClashDirectStatus, setClashDirect } from "./clash";
 import { listAudit } from "./db";
 import { bookingDayOffsetFor } from "./config";
 
-export function createApi(auth: AuthService, scheduler: Scheduler) {
+export const ACCOUNT_HEADER = "x-account-id";
+
+export function createApi(accounts: AccountManager) {
   const json = (body: unknown, init?: ResponseInit) => Response.json(body, init);
-  const requireAuth = () => auth.authenticated ? undefined : json({ detail: "authentication required" }, { status: 401 });
   return async (request: Request): Promise<Response> => {
     const url = new URL(request.url);
     if (url.pathname === "/api/health") return json({ status: "ok" });
-    if (url.pathname === "/api/session" && request.method === "GET") return json(auth.status());
+
+    // ---- 账户管理（不依赖当前账户） ----
+    if (url.pathname === "/api/accounts" && request.method === "GET") return json({ accounts: accounts.summaries() });
+    const accountMatch = url.pathname.match(/^\/api\/accounts\/([^/]+)$/);
+    if (accountMatch && request.method === "DELETE") {
+      return accounts.remove(decodeURIComponent(accountMatch[1])) ? json({ success: true }) : json({ detail: "账户不存在" }, { status: 404 });
+    }
+    // 登录总是新增/合并账户：同一学号或 UID 会合并到已有账户。
     if (url.pathname === "/api/session/login" && request.method === "POST") {
       const body = await request.json().catch(() => ({})) as { studentId?: string; password?: string };
-      return json(await auth.login(body.studentId || "", body.password || ""));
+      return json(await accounts.login(body.studentId || "", body.password || ""));
     }
     if (url.pathname === "/api/session/qr" && request.method === "POST") {
-      return json(await auth.createQrLogin());
+      return json(await accounts.createQrLogin());
     }
     const qrMatch = url.pathname.match(/^\/api\/session\/qr\/([^/]+)\/status$/);
     if (qrMatch && request.method === "GET") {
-      return json(await auth.pollQrLogin(decodeURIComponent(qrMatch[1])));
+      return json(accounts.pollQrLogin(decodeURIComponent(qrMatch[1])));
     }
     // Clash 控制不需要登录态：登录被代理问题卡住时正是需要它的时候。
     if (url.pathname === "/api/clash/direct" && request.method === "GET") return json(await getClashDirectStatus());
@@ -30,64 +37,80 @@ export function createApi(auth: AuthService, scheduler: Scheduler) {
       const body = await request.json().catch(() => ({})) as { enabled?: boolean };
       return json(await setClashDirect(Boolean(body.enabled)));
     }
+    // 跨账户的审计流：桌面通知需要看到所有账户的结果。
+    if (url.pathname === "/api/audit" && request.method === "GET" && url.searchParams.get("scope") === "all") {
+      return json({ events: listAudit(Number(url.searchParams.get("limit")) || 20, accountId) });
+    }
+
+    // ---- 以下接口作用于当前账户（X-Account-Id 请求头或 accountId 查询参数） ----
+    const requestedId = request.headers.get(ACCOUNT_HEADER) || url.searchParams.get("accountId");
+    const context = accounts.get(requestedId);
+    if (url.pathname === "/api/session" && request.method === "GET") {
+      // 本地记住的账户已被移除时回退到第一个账户，前端据返回的 accountId 自动切换。
+      const current = context || accounts.get(null);
+      return json(current ? current.auth.status() : { authenticated: false, refreshing: false });
+    }
+    if (!context) return json({ detail: "authentication required" }, { status: 401 });
+    const { auth, scheduler, id: accountId } = context;
     if (url.pathname === "/api/session/logout" && request.method === "POST") {
       auth.logout();
       return json({ success: true });
     }
+    const requireAuth = () => auth.authenticated ? undefined : json({ detail: "authentication required" }, { status: 401 });
     const unauthorized = requireAuth();
     if (unauthorized) return unauthorized;
     if (url.pathname === "/api/audit" && request.method === "GET") {
-      return json({ events: listAudit(Number(url.searchParams.get("limit")) || 20) });
+      return json({ events: listAudit(Number(url.searchParams.get("limit")) || 20, accountId) });
     }
-    if (url.pathname === "/api/plans" && request.method === "GET") return json({ plans: listPlanItems() });
-    if (url.pathname === "/api/plans" && request.method === "POST") return json({ plan: createPlan(await request.json()) }, { status: 201 });
+    if (url.pathname === "/api/plans" && request.method === "GET") return json({ plans: listPlanItems(accountId) });
+    if (url.pathname === "/api/plans" && request.method === "POST") return json({ plan: createPlan(accountId, await request.json()) }, { status: 201 });
     const planMatch = url.pathname.match(/^\/api\/plans\/([^/]+)(?:\/(enable|disable))?$/);
     if (planMatch) {
       const id = decodeURIComponent(planMatch[1]);
       const action = planMatch[2];
       if (request.method === "GET") {
-        const item = getPlanItem(id);
+        const item = getPlanItem(accountId, id);
         return item ? json({ plan: item }) : json({ detail: "方案不存在" }, { status: 404 });
       }
       if (request.method === "DELETE") {
-        const item = getPlanItem(id);
+        const item = getPlanItem(accountId, id);
         if (!item) return json({ detail: "方案不存在" }, { status: 404 });
         if (item.kind === "single" && referencedPlanIds(id).length) return json({ detail: "该单条方案已被组合引用，请先移出组合" }, { status: 409 });
-        return (item.kind === "group" ? deleteGroup(id) : deletePlan(id)) ? json({ success: true }) : json({ detail: "方案不存在" }, { status: 404 });
+        return (item.kind === "group" ? deleteGroup(accountId, id) : deletePlan(accountId, id)) ? json({ success: true }) : json({ detail: "方案不存在" }, { status: 404 });
       }
       if (request.method === "PATCH") {
-        const item = getPlanItem(id);
+        const item = getPlanItem(accountId, id);
         if (!item) return json({ detail: "方案不存在" }, { status: 404 });
         if (item.kind === "group") {
           const body = await request.json() as { name?: string; memberPlanIds?: string[] };
-          return json({ plan: updateGroup(id, body.name || item.name, body.memberPlanIds || item.memberPlanIds) });
+          return json({ plan: updateGroup(accountId, id, body.name || item.name, body.memberPlanIds || item.memberPlanIds) });
         }
-        return json({ plan: updatePlan(id, await request.json()) });
+        return json({ plan: updatePlan(accountId, id, await request.json()) });
       }
       if (request.method === "POST" && action) {
-        const result = enablePlanItem(id, action === "enable");
+        const result = enablePlanItem(accountId, id, action === "enable");
         return json({ plan: result.item, disabledPlanIds: result.disabledPlanIds });
       }
     }
     if (url.pathname === "/api/groups" && request.method === "POST") {
       const body = await request.json() as { name?: string; memberPlanIds?: string[] };
-      return json({ plan: createGroup(body.name || "", body.memberPlanIds || []) }, { status: 201 });
+      return json({ plan: createGroup(accountId, body.name || "", body.memberPlanIds || []) }, { status: 201 });
     }
     const groupMatch = url.pathname.match(/^\/api\/groups\/([^/]+)$/);
     if (groupMatch) {
       const id = decodeURIComponent(groupMatch[1]);
-      if (request.method === "GET") return json({ plan: getPlanItem(id) });
+      if (request.method === "GET") return json({ plan: getPlanItem(accountId, id) });
       if (request.method === "PATCH") {
         const body = await request.json() as { name?: string; memberPlanIds?: string[] };
-        return json({ plan: updateGroup(id, body.name || "", body.memberPlanIds || []) });
+        return json({ plan: updateGroup(accountId, id, body.name || "", body.memberPlanIds || []) });
       }
-      if (request.method === "DELETE") return deleteGroup(id) ? json({ success: true }) : json({ detail: "组合方案不存在" }, { status: 404 });
+      if (request.method === "DELETE") return deleteGroup(accountId, id) ? json({ success: true }) : json({ detail: "组合方案不存在" }, { status: 404 });
     }
     if (url.pathname === "/api/booking/run" && request.method === "POST") return json(await scheduler.runNow());
     if (url.pathname === "/api/runtime/status") return json(scheduler.status());
     if (url.pathname === "/api/runtime/next-target") {
       const now = new Date();
-      const enabled = listPlanItems().find((item) => item.enabled);
+      const enabled = listPlanItems(accountId).find((item) => item.enabled);
       const enabledRoomType = enabled?.kind === "single"
         ? enabled.roomType
         : enabled?.kind === "group"

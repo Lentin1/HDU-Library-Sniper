@@ -3,10 +3,16 @@ import { dirname } from "node:path";
 import { mkdirSync } from "node:fs";
 import { dataDir } from "./config";
 
-const lockPath = `${dataDir}/hdu-library-sniper.job.lock`;
 const lockTtlMs = 10 * 60_000;
 
-export function tryAcquireJobLock(owner: "booking" | "check-in"): (() => void) | undefined {
+// 每个账户一把任务锁：同一账户的预约/签到互斥，不同账户可同时执行。
+function lockPathFor(scope: string): string {
+  const safe = scope.replace(/[^A-Za-z0-9_-]/g, "_") || "default";
+  return `${dataDir}/hdu-library-sniper.${safe}.job.lock`;
+}
+
+export function tryAcquireJobLock(owner: "booking" | "check-in", scope = "default"): (() => void) | undefined {
+  const lockPath = lockPathFor(scope);
   mkdirSync(dirname(lockPath), { recursive: true });
   if (existsSync(lockPath)) {
     try {

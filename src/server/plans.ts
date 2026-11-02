@@ -5,7 +5,7 @@ import { deleteGroup, getGroupMembers, listGroups, referencedPlanIds, saveGroup,
 import type { BookingGroup, PlanListItem } from "../shared/types";
 import { validatePlan, validWeekdays } from "../shared/plan-validation";
 
-export function createPlan(input: Partial<BookingPlan>): BookingPlan {
+export function createPlan(accountId: string, input: Partial<BookingPlan>): BookingPlan {
   const now = new Date().toISOString();
   const plan: BookingPlan = {
     id: input.id || randomUUID(),
@@ -25,25 +25,25 @@ export function createPlan(input: Partial<BookingPlan>): BookingPlan {
   };
   const errors = validatePlan(plan);
   if (errors.length) throw new Error(errors.join("；"));
-  return savePlan(plan);
+  return savePlan(accountId, plan);
 }
 
-export function updatePlan(id: string, input: Partial<BookingPlan>): BookingPlan {
-  const current = getPlan(id);
+export function updatePlan(accountId: string, id: string, input: Partial<BookingPlan>): BookingPlan {
+  const current = getPlan(accountId, id);
   if (!current) throw new Error("方案不存在");
   const updated = { ...current, ...input, id, createdAt: current.createdAt };
-  const groups = listGroups().filter((row) => getGroupMembers(String(row.id)).includes(id));
+  const groups = listGroups(accountId).filter((row) => getGroupMembers(String(row.id)).includes(id));
   for (const group of groups) {
-    const members = getGroupMembers(String(group.id)).map((memberId) => memberId === id ? updated : getPlan(memberId)).filter((plan): plan is BookingPlan => Boolean(plan));
-    validateGroup(String(group.name || "组合方案"), members.map((plan) => plan.id), members);
+    const members = getGroupMembers(String(group.id)).map((memberId) => memberId === id ? updated : getPlan(accountId, memberId)).filter((plan): plan is BookingPlan => Boolean(plan));
+    validateGroup(accountId, String(group.name || "组合方案"), members.map((plan) => plan.id), members);
   }
-  return createPlan(updated);
+  return createPlan(accountId, updated);
 }
 
-export function listPlanItems(): PlanListItem[] {
-  const singles = listPlans();
+export function listPlanItems(accountId: string): PlanListItem[] {
+  const singles = listPlans(accountId);
   const byId = new Map(singles.map((plan) => [plan.id, plan]));
-  const groups: BookingGroup[] = listGroups().map((row) => {
+  const groups: BookingGroup[] = listGroups(accountId).map((row) => {
     const memberPlanIds = getGroupMembers(String(row.id));
     return {
       id: String(row.id),
@@ -60,19 +60,19 @@ export function listPlanItems(): PlanListItem[] {
   return [...singles, ...groups];
 }
 
-export function getPlanItem(id: string): PlanListItem | undefined {
-  return listPlanItems().find((item) => item.id === id);
+export function getPlanItem(accountId: string, id: string): PlanListItem | undefined {
+  return listPlanItems(accountId).find((item) => item.id === id);
 }
 
-export function enablePlanItem(id: string, enabled: boolean): { item: PlanListItem; disabledPlanIds: string[] } {
-  const item = getPlanItem(id);
+export function enablePlanItem(accountId: string, id: string, enabled: boolean): { item: PlanListItem; disabledPlanIds: string[] } {
+  const item = getPlanItem(accountId, id);
   if (!item) throw new Error("方案不存在");
-  const disabledPlanIds = setOnlyEnabled(id, enabled);
-  return { item: getPlanItem(id)!, disabledPlanIds };
+  const disabledPlanIds = setOnlyEnabled(accountId, id, enabled);
+  return { item: getPlanItem(accountId, id)!, disabledPlanIds };
 }
 
-function validateGroup(name: string, memberPlanIds: string[], overridePlans?: BookingPlan[]): { name: string; memberPlanIds: string[]; plans: BookingPlan[]; weekdays: Weekday[] } {
-  const singles = overridePlans || memberPlanIds.map((id) => getPlan(id));
+function validateGroup(accountId: string, name: string, memberPlanIds: string[], overridePlans?: BookingPlan[]): { name: string; memberPlanIds: string[]; plans: BookingPlan[]; weekdays: Weekday[] } {
+  const singles = overridePlans || memberPlanIds.map((id) => getPlan(accountId, id));
   if (memberPlanIds.length < 2 || singles.some((plan) => !plan)) throw new Error("组合方案至少需要两个有效单条方案");
   if (new Set(memberPlanIds).size !== memberPlanIds.length) throw new Error("组合方案不能包含重复方案");
   const plans = singles as BookingPlan[];
@@ -91,21 +91,21 @@ function validateGroup(name: string, memberPlanIds: string[], overridePlans?: Bo
   return { name: normalizedName, memberPlanIds, plans, weekdays: plans[0].weekdays };
 }
 
-export function createGroup(name: string, memberPlanIds: string[]): BookingGroup {
-  const validated = validateGroup(name, memberPlanIds);
+export function createGroup(accountId: string, name: string, memberPlanIds: string[]): BookingGroup {
+  const validated = validateGroup(accountId, name, memberPlanIds);
   const now = new Date().toISOString();
   const group: BookingGroup = { id: randomUUID(), kind: "group", name: validated.name, memberPlanIds: validated.memberPlanIds, members: validated.plans, weekdays: validated.weekdays, enabled: false, createdAt: now, updatedAt: now };
-  saveGroup(group);
+  saveGroup(accountId, group);
   return group;
 }
 
-export function updateGroup(id: string, name: string, memberPlanIds: string[]): BookingGroup {
-  const current = getPlanItem(id);
+export function updateGroup(accountId: string, id: string, name: string, memberPlanIds: string[]): BookingGroup {
+  const current = getPlanItem(accountId, id);
   if (!current || current.kind !== "group") throw new Error("组合方案不存在");
-  const validated = validateGroup(name, memberPlanIds);
+  const validated = validateGroup(accountId, name, memberPlanIds);
   const now = new Date().toISOString();
-  saveGroup({ id, kind: "group", name: validated.name, memberPlanIds: validated.memberPlanIds, members: validated.plans, weekdays: validated.weekdays, enabled: current.enabled, createdAt: current.createdAt, updatedAt: now } as BookingGroup);
-  return getPlanItem(id) as BookingGroup;
+  saveGroup(accountId, { id, kind: "group", name: validated.name, memberPlanIds: validated.memberPlanIds, members: validated.plans, weekdays: validated.weekdays, enabled: current.enabled, createdAt: current.createdAt, updatedAt: now } as BookingGroup);
+  return getPlanItem(accountId, id) as BookingGroup;
 }
 
 export { deletePlan, deleteGroup, referencedPlanIds };

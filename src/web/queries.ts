@@ -6,6 +6,7 @@ const useAuthenticated = () => useAppStore((state) => state.session?.authenticat
 
 export const queryKeys = {
   session: ["session"] as const,
+  accounts: ["accounts"] as const,
   plans: ["plans"] as const,
   bookings: ["bookings"] as const,
   checkin: ["checkin"] as const,
@@ -16,6 +17,9 @@ export const queryKeys = {
   durations: (roomQuery: string, startHour: number, roomType?: string) => ["durations", roomQuery, roomType || "", startHour] as const,
 };
 
+export function useAccounts() {
+  return useQuery({ queryKey: queryKeys.accounts, queryFn: api.accounts, refetchInterval: 15_000 });
+}
 export function useSession() { return useQuery({ queryKey: queryKeys.session, queryFn: api.session, retry: false }); }
 export function usePlans() {
   const authenticated = useAuthenticated();

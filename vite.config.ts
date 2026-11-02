@@ -13,7 +13,7 @@ export default defineConfig({
     tailwindcss(),
     VitePWA({
       registerType: "autoUpdate",
-      includeAssets: ["favicon.svg"],
+      includeAssets: ["favicon.svg", "app-icon.png"],
       manifest: {
         name: "HDU Library Sniper",
         short_name: "HDU Sniper",
@@ -21,7 +21,7 @@ export default defineConfig({
         theme_color: "#0f172a",
         background_color: "#f8fafc",
         display: "standalone",
-        icons: [{ src: "favicon.svg", sizes: "any", type: "image/svg+xml", purpose: "any maskable" }],
+        icons: [{ src: "app-icon.png", sizes: "256x256", type: "image/png", purpose: "any" }],
       },
       workbox: { globPatterns: ["**/*.{js,css,html,svg,woff2}"] },
     }),

@@ -2,13 +2,13 @@
 
 import { useCallback, useEffect, useRef, useState } from "react"
 import { useNavigate } from "@tanstack/react-router"
-import { LogIn, QrCode, RefreshCw, ShieldCheck } from "lucide-react"
+import { ArrowLeft, LogIn, QrCode, RefreshCw, ShieldCheck } from "lucide-react"
+import { useQueryClient } from "@tanstack/react-query"
 import { useForm } from "react-hook-form"
 import { zodResolver } from "@hookform/resolvers/zod"
 import { z } from "zod"
 
 import { Alert, AlertDescription } from "@/components/ui/alert"
-import { Avatar, AvatarFallback } from "@/components/ui/avatar"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import {
@@ -26,7 +26,7 @@ import { api } from "../api"
 import { useSession } from "../queries"
 import { useAppStore } from "../store"
 import { Busy, loginSchema } from "../shared"
-import type { QrLoginStart } from "../../shared/types"
+import type { QrLoginStart, SessionStatus } from "../../shared/types"
 
 // 二维码状态机。UI 只对“确定性”状态做反馈，不做中间态伪反馈：
 //  - loading：正在获取二维码（确定）
@@ -37,9 +37,19 @@ import type { QrLoginStart } from "../../shared/types"
 // 文案——SSO 不暴露这些中间态，任何此类反馈都是歧义。
 type QrState = "loading" | "ready" | "confirmed" | "expired" | "error"
 
-function LoginPage() {
+function LoginPage({ onCancel }: { onCancel?: () => void }) {
   const navigate = useNavigate()
   const setSession = useAppStore((state) => state.setSession)
+  const setAddingAccount = useAppStore((state) => state.setAddingAccount)
+  const queryClient = useQueryClient()
+
+  // 登录成功即切换到该账户：清空上一个账户的缓存，其它账户继续在后台运行。
+  const enterAccount = useCallback(async (session: SessionStatus) => {
+    setSession(session)
+    setAddingAccount(false)
+    queryClient.removeQueries()
+    await navigate({ to: "/plans" })
+  }, [navigate, queryClient, setAddingAccount, setSession])
   const form = useForm<z.infer<typeof loginSchema>>({
     resolver: zodResolver(loginSchema),
     defaultValues: { studentId: "", password: "" },
@@ -88,8 +98,7 @@ function LoginPage() {
         if (result.status === "confirmed") {
           setQrState("confirmed")
           if (result.session?.authenticated) {
-            setSession(result.session)
-            await navigate({ to: "/plans" })
+            await enterAccount(result.session)
           } else {
             setQrState("error")
             setQrMessage("扫码已确认，但登录态校验失败")
@@ -133,7 +142,7 @@ function LoginPage() {
       if (pollTimer.current) clearTimeout(pollTimer.current)
       if (expiryTimer.current) clearTimeout(expiryTimer.current)
     }
-  }, [qr, loadQr, navigate, setSession])
+  }, [qr, loadQr, enterAccount])
 
   useEffect(() => {
     void loadQr()
@@ -144,8 +153,7 @@ function LoginPage() {
     try {
       const result = await api.login(values.studentId, values.password)
       if (!result.success) throw new Error(result.message)
-      setSession(await api.session())
-      await navigate({ to: "/plans" })
+      await enterAccount(result.session ?? await api.session())
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : "登录失败")
     }
@@ -159,19 +167,26 @@ function LoginPage() {
       <Card className="relative z-10 w-full min-w-0 max-w-[min(86vw,48rem)] overflow-hidden">
         <CardHeader className="min-w-0">
           <div className="mb-4 flex items-center gap-3">
-            <Avatar className="size-11 rounded-lg">
-              <AvatarFallback className="rounded-lg bg-primary text-primary-foreground">
-                H
-              </AvatarFallback>
-            </Avatar>
+            <img src="/app-icon.png" alt="" className="size-11 rounded-lg" />
             <div>
               <CardTitle>HDU Sniper</CardTitle>
               <CardDescription>预约工作台</CardDescription>
             </div>
           </div>
-          <CardTitle render={<h1 />} className="text-3xl">
-            登录图书馆账户
-          </CardTitle>
+          <div className="flex items-center justify-between gap-3">
+            <CardTitle render={<h1 />} className="text-3xl">
+              {onCancel ? "添加图书馆账户" : "登录图书馆账户"}
+            </CardTitle>
+            {onCancel && (
+              <Button variant="ghost" size="sm" onClick={onCancel}>
+                <ArrowLeft className="size-4" />
+                返回工作台
+              </Button>
+            )}
+          </div>
+          {onCancel && (
+            <CardDescription>新账户会与已有账户同时在后台运行，各自独立预约与签到。</CardDescription>
+          )}
         </CardHeader>
         <div className="grid gap-0 px-6 pb-6 md:grid-cols-[minmax(0,1fr)_1px_minmax(0,1fr)]">
           <Form onSubmit={form.handleSubmit(submit)} className="contents">
@@ -258,6 +273,8 @@ function LoginPage() {
 export function LoginGate() {
   const session = useAppStore((state) => state.session)
   const setSession = useAppStore((state) => state.setSession)
+  const adding = useAppStore((state) => state.addingAccount)
+  const setAddingAccount = useAppStore((state) => state.setAddingAccount)
   const query = useSession()
   const navigate = useNavigate()
 
@@ -266,9 +283,16 @@ export function LoginGate() {
   }, [query.data, setSession])
 
   useEffect(() => {
-    if (session?.authenticated) void navigate({ to: "/plans", replace: true })
-  }, [session, navigate])
+    if (session?.authenticated && !adding) void navigate({ to: "/plans", replace: true })
+  }, [session, adding, navigate])
 
+  if (adding) {
+    return (
+      <LoginPage
+        onCancel={session?.authenticated ? () => { setAddingAccount(false); void navigate({ to: "/plans" }) } : undefined}
+      />
+    )
+  }
   if (query.isLoading && !session) return <Busy label="正在连接后台服务..." />
   return session?.authenticated ? <Busy /> : <LoginPage />
 }

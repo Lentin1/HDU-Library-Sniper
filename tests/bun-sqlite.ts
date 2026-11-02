@@ -15,6 +15,20 @@ export class Database {
     return this.db.prepare(sql);
   }
 
+  transaction<T extends unknown[], R>(fn: (...args: T) => R): (...args: T) => R {
+    return (...args: T) => {
+      this.db.exec("BEGIN");
+      try {
+        const result = fn(...args);
+        this.db.exec("COMMIT");
+        return result;
+      } catch (error) {
+        this.db.exec("ROLLBACK");
+        throw error;
+      }
+    };
+  }
+
   close(): void {
     this.db.close();
   }

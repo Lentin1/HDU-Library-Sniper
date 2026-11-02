@@ -2,14 +2,14 @@
 
 import { useEffect, useState } from "react"
 import { Link, Outlet, useNavigate, useRouterState } from "@tanstack/react-router"
-import { CalendarDays, ExternalLink, Library, ListChecks, LogOut, Network, RefreshCw, Settings } from "lucide-react"
+import { CalendarDays, ExternalLink, Library, ListChecks, LogOut, Network, RefreshCw, Settings, Trash2, UserPlus, Users } from "lucide-react"
 import { motion, useReducedMotion } from "motion/react"
 
 import { AnimatedGridPattern } from "@/components/ui/animated-grid-pattern"
 import { AnimatedThemeToggler } from "@/components/ui/animated-theme-toggler"
 import { Avatar, AvatarFallback } from "@/components/ui/avatar"
 import { Button } from "@/components/ui/button"
-import { Menu, MenuItem, MenuPopup, MenuTrigger } from "@/components/ui/menu"
+import { Menu, MenuItem, MenuPopup, MenuSeparator, MenuTrigger } from "@/components/ui/menu"
 import { Separator } from "@/components/ui/separator"
 import {
   Sidebar,
@@ -31,6 +31,7 @@ import { useQueryClient } from "@tanstack/react-query"
 import { useAppStore } from "../store"
 import {
   queryKeys,
+  useAccounts,
   useCheckin,
   useCheckinMutation,
   useNextTarget,
@@ -144,6 +145,86 @@ function ClashControl() {
   )
 }
 
+function useSwitchAccount() {
+  const queryClient = useQueryClient()
+  const navigate = useNavigate()
+  return async (id: string) => {
+    const store = useAppStore.getState()
+    if (id === store.currentAccountId && store.session?.authenticated) return
+    store.setCurrentAccountId(id)
+    // 切换只影响界面查看的账户；所有账户的预约与签到都在后台同时执行。
+    await queryClient.resetQueries({ predicate: (query) => query.queryKey[0] !== "accounts" })
+    try {
+      const session = await api.session()
+      useAppStore.getState().setSession(session)
+      if (!session.authenticated) navigate({ to: "/", replace: true })
+    } catch (cause) {
+      toastManager.add({ type: "error", title: cause instanceof Error ? cause.message : "切换账户失败" })
+    }
+  }
+}
+
+function AccountsGroup() {
+  const { data } = useAccounts()
+  const currentAccountId = useAppStore((state) => state.currentAccountId)
+  const switchTo = useSwitchAccount()
+  const navigate = useNavigate()
+  const accounts = data?.accounts || []
+
+  return (
+    <SidebarGroup>
+      <SidebarGroupLabel>
+        <Users className="mr-1.5 size-3.5" />
+        账户（{accounts.length}）
+      </SidebarGroupLabel>
+      <SidebarGroupContent>
+        <SidebarMenu>
+          {accounts.map((account) => {
+            const label = account.name || account.studentId || "未命名账户"
+            const dot = !account.authenticated || account.state === "auth_required"
+              ? "bg-warning"
+              : account.state === "running"
+                ? "bg-primary animate-pulse"
+                : account.state === "error"
+                  ? "bg-destructive"
+                  : "bg-success"
+            return (
+              <SidebarMenuItem key={account.id}>
+                <SidebarMenuButton
+                  isActive={account.id === currentAccountId}
+                  onClick={() => void switchTo(account.id)}
+                  title={account.lastMessage || (account.authenticated ? "已登录" : "需要重新登录")}
+                  className="h-auto py-1.5"
+                >
+                  <span className={`size-2 shrink-0 rounded-full ${dot}`} />
+                  <span className="grid min-w-0 text-left leading-tight">
+                    <span className="truncate text-sm">{label}</span>
+                    <span className="truncate text-[11px] text-muted-foreground">
+                      {!account.authenticated ? "需要重新登录" : account.enabledPlan ? `已启用：${account.enabledPlan}` : "未启用方案"}
+                    </span>
+                  </span>
+                </SidebarMenuButton>
+              </SidebarMenuItem>
+            )
+          })}
+          <SidebarMenuItem>
+            <SidebarMenuButton
+              className="text-muted-foreground"
+              onClick={() => {
+                useAppStore.getState().setAddingAccount(true)
+                navigate({ to: "/" })
+              }}
+            >
+              <UserPlus className="size-4" />
+              添加账户
+            </SidebarMenuButton>
+          </SidebarMenuItem>
+        </SidebarMenu>
+      </SidebarGroupContent>
+    </SidebarGroup>
+  )
+}
+
 function NextBlock({
   label,
   at,
@@ -182,6 +263,7 @@ export function AppShell() {
   const runtime = useRuntime()
   const reduced = useReducedMotion()
   const authenticated = Boolean(session?.authenticated)
+  const switchAccount = useSwitchAccount()
 
   useEffect(() => {
     const timer = window.setTimeout(() => {
@@ -194,7 +276,7 @@ export function AppShell() {
   useEffect(() => {
     if (!authenticated) return
     let active = true
-    const poll = async () => { try { const result = await api.audit(50); if (active) await notifyAuditEvents(result.events) } catch { /* backend may not be ready yet */ } }
+    const poll = async () => { try { const result = await api.auditAll(50); if (active) await notifyAuditEvents(result.events) } catch { /* backend may not be ready yet */ } }
     void poll(); const timer = window.setInterval(() => void poll(), 15_000)
     return () => { active = false; window.clearInterval(timer) }
   }, [authenticated])
@@ -239,9 +321,7 @@ export function AppShell() {
             <Sidebar variant="inset">
               <SidebarHeader>
                 <div className="flex items-center gap-3 px-2 py-2">
-                  <span className="grid size-9 place-items-center rounded-xl bg-primary text-primary-foreground shadow-lg">
-                    <Library className="size-5" />
-                  </span>
+                  <img src="/app-icon.png" alt="" className="size-9 rounded-xl shadow-lg" />
                   <div className="group-data-[collapsible=icon]:hidden">
                     <strong className="block text-sm">HDU Sniper</strong>
                     <span className="text-xs text-muted-foreground">
@@ -278,6 +358,7 @@ export function AppShell() {
                     </SidebarMenu>
                   </SidebarGroupContent>
                 </SidebarGroup>
+                <AccountsGroup />
               </SidebarContent>
               <SidebarFooter>
                 <NextBlock
@@ -329,6 +410,16 @@ export function AppShell() {
                     </MenuTrigger>
                     <MenuPopup align="end">
                       <MenuItem
+                        onClick={() => {
+                          useAppStore.getState().setAddingAccount(true)
+                          navigate({ to: "/" })
+                        }}
+                      >
+                        <UserPlus />
+                        添加账户
+                      </MenuItem>
+                      <MenuSeparator />
+                      <MenuItem
                         onClick={() => void openExternalUrl("https://github.com/AlaIchhe/HDU-Library-Sniper/releases")}
                       >
                         <ExternalLink />
@@ -352,7 +443,34 @@ export function AppShell() {
                         }}
                       >
                         <LogOut />
-                        退出登录
+                        退出当前账户登录
+                      </MenuItem>
+                      <MenuItem
+                        variant="destructive"
+                        onClick={async () => {
+                          const id = useAppStore.getState().currentAccountId
+                          if (!id) return
+                          if (!window.confirm(`移除账户「${session?.name || id}」？该账户的预约方案会一并删除，后台不再为它预约和签到。`)) return
+                          try {
+                            await api.removeAccount(id)
+                            const rest = (await api.accounts()).accounts
+                            await queryClient.invalidateQueries({ queryKey: queryKeys.accounts })
+                            if (rest[0]) {
+                              await switchAccount(rest[0].id)
+                            } else {
+                              useAppStore.getState().setCurrentAccountId(null)
+                              queryClient.removeQueries()
+                              setSession(null)
+                              navigate({ to: "/", replace: true })
+                            }
+                            toastManager.add({ type: "success", title: "账户已移除" })
+                          } catch (cause) {
+                            toastManager.add({ type: "error", title: cause instanceof Error ? cause.message : "移除账户失败" })
+                          }
+                        }}
+                      >
+                        <Trash2 />
+                        移除当前账户
                       </MenuItem>
                     </MenuPopup>
                   </Menu>

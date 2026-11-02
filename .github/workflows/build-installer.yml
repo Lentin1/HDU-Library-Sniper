@@ -1,0 +1,46 @@
+name: Build Windows installer
+
+# 无需签名私钥即可构建：关闭 updater 产物，只产出可直接安装的 MSI 与 NSIS 安装包，
+# 作为 Actions artifact 下载。推送到任意分支或手动触发均可。
+on:
+  workflow_dispatch:
+  push:
+    branches: ["multi-account", "main"]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: installer-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+      - run: bun install --frozen-lockfile
+      - name: Typecheck
+        run: bun run typecheck
+      - name: Unit tests
+        run: bun run test
+      - name: Build installer (MSI + NSIS)
+        shell: pwsh
+        run: bun run tauri build --bundles msi,nsis --config '{\"bundle\":{\"createUpdaterArtifacts\":false}}'
+      - uses: actions/upload-artifact@v4
+        with:
+          name: HDU-Library-Sniper-windows-x64
+          path: |
+            src-tauri/target/release/bundle/msi/*.msi
+            src-tauri/target/release/bundle/nsis/*.exe
+          if-no-files-found: error

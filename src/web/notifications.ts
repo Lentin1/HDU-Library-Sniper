@@ -31,7 +31,8 @@ export async function notifyAuditEvents(events: AuditEvent[]): Promise<void> {
     if (await notification.requestPermission() !== "granted") return
   }
   for (const event of fresh) {
-    await notification.sendNotification({ title: "HDU Library Sniper", body: `${event.event}：${text(event)}` })
+    const who = event.accountName ? `［${event.accountName}］` : ""
+    await notification.sendNotification({ title: "HDU Library Sniper", body: `${who}${event.event}：${text(event)}` })
     seen.add(event.id)
   }
   const ids = [...seen].sort((a, b) => b - a).slice(0, 100)

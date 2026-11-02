@@ -1,14 +1,11 @@
 import { port } from "./config";
-import { AuthService } from "./auth";
 import { createApi } from "./api";
-import { Scheduler } from "./scheduler";
-import { BookingExecutor } from "./booking";
+import { AccountManager } from "./accounts";
 
-const auth = new AuthService();
-const scheduler = new Scheduler(auth, new BookingExecutor(auth.client));
-const api = createApi(auth, scheduler);
-scheduler.start();
-void auth.restore();
+// 每个已保存账户都有独立的调度器，同时运行。
+const accounts = new AccountManager();
+const api = createApi(accounts);
+accounts.start();
 
 const server = Bun.serve({
   port,
@@ -21,7 +18,7 @@ const server = Bun.serve({
       const shell = Bun.file("dist/web/index.html");
       if (await shell.exists()) return new Response(shell);
     }
-    if (request.method === "OPTIONS") return new Response(null, { headers: { "Access-Control-Allow-Origin": "*", "Access-Control-Allow-Headers": "Content-Type", "Access-Control-Allow-Methods": "GET,POST,PATCH,DELETE,OPTIONS" } });
+    if (request.method === "OPTIONS") return new Response(null, { headers: { "Access-Control-Allow-Origin": "*", "Access-Control-Allow-Headers": "Content-Type, X-Account-Id", "Access-Control-Allow-Methods": "GET,POST,PATCH,DELETE,OPTIONS" } });
     let response: Response;
     try {
       response = await api(request);

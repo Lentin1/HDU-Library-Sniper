@@ -1,6 +1,6 @@
 import type { RuntimeStatus } from "../shared/types";
 import { AuthService } from "./auth";
-import { getMeta, setMeta, writeAudit } from "./db";
+import { getAccount, setAccountAutoCheckIn, writeAudit } from "./db";
 import { bookingAnchorDelaySeconds, bookingPrelockDelaySeconds, timezone } from "./config";
 import { tryAcquireJobLock } from "./lock";
 import { BookingExecutor } from "./booking";
@@ -25,6 +25,9 @@ export class Scheduler {
 
   constructor(private readonly auth: AuthService, private readonly booking: BookingExecutor) {}
 
+  private get accountId(): string { return this.auth.accountId; }
+  private audit(event: string, payload: Record<string, unknown>): void { writeAudit(event, payload, this.accountId); }
+
   status(): RuntimeStatus {
     return {
       ...this.statusValue,
@@ -32,11 +35,10 @@ export class Scheduler {
     };
   }
   readonly consentVersion = "2026-08-02.1";
-  get autoCheckInEnabled(): boolean { return getMeta("auto_checkin_enabled") === "1"; }
-  get consentedAt(): string | undefined { return getMeta("auto_checkin_consented_at"); }
+  get autoCheckInEnabled(): boolean { return Boolean(getAccount(this.accountId)?.autoCheckIn); }
+  get consentedAt(): string | undefined { return getAccount(this.accountId)?.checkInConsentedAt; }
   setAutoCheckIn(enabled: boolean, agreed = false): void {
-    setMeta("auto_checkin_enabled", enabled ? "1" : "0");
-    if (enabled && agreed) setMeta("auto_checkin_consented_at", new Date().toISOString());
+    setAccountAutoCheckIn(this.accountId, enabled, enabled && agreed ? new Date().toISOString() : undefined);
   }
 
   start(): void {
@@ -79,7 +81,8 @@ export class Scheduler {
   }
 
   private scheduleBookingAnchor(): void {
-    if (this.bookingTimer) return;
+    // 账户被移除后 stop() 会把调度器标记为 stopped，进行中的任务结束时不再续期。
+    if (this.bookingTimer || this.statusValue.scheduler !== "running") return;
     const secondsOfDay = this.shanghaiSecondsOfDay();
     const anchorDelay = bookingAnchorDelaySeconds(secondsOfDay);
     const prelockDelay = bookingPrelockDelaySeconds(secondsOfDay);
@@ -98,7 +101,7 @@ export class Scheduler {
   }
 
   private async bookingPrelockTick(anchorAt: Date): Promise<void> {
-    if (!listPlanItems().some((item) => item.enabled)) return;
+    if (!listPlanItems(this.accountId).some((item) => item.enabled)) return;
     const deadline = new Date(Math.max(Date.now(), anchorAt.getTime() - 5_000));
     this.statusValue.state = "running";
     try {
@@ -114,7 +117,7 @@ export class Scheduler {
         this.statusValue.lastMessage = result.message;
       } else {
         this.statusValue.lastMessage = `预锁失败：${String(error)}`;
-        writeAudit("booking_prelock_failed", { error: String(error) });
+        this.audit("booking_prelock_failed", { error: String(error) });
       }
     } finally {
       if (this.statusValue.state === "running") this.statusValue.state = "idle";
@@ -122,7 +125,7 @@ export class Scheduler {
   }
 
   private async bookingAnchorTick(): Promise<void> {
-    if (!listPlanItems().some((item) => item.enabled)) return;
+    if (!listPlanItems(this.accountId).some((item) => item.enabled)) return;
     this.statusValue.state = "running";
     try {
       if (!(await this.auth.restore())) {
@@ -139,7 +142,7 @@ export class Scheduler {
         this.statusValue.lastMessage = result.message;
       } else {
         this.statusValue.lastMessage = String(error);
-        writeAudit("booking_burst_failed", { error: String(error) });
+        this.audit("booking_burst_failed", { error: String(error) });
       }
     } finally {
       if (this.statusValue.state === "running") this.statusValue.state = "idle";
@@ -168,7 +171,7 @@ export class Scheduler {
   private async checkInTick(): Promise<void> {
     const minutes = this.localMinutes();
     if (!this.autoCheckInEnabled || minutes < checkInStartMinutes || minutes > checkInEndMinutes) return;
-    const release = tryAcquireJobLock("check-in");
+    const release = tryAcquireJobLock("check-in", this.accountId);
     if (!release) return;
     try {
       if (!(await this.auth.restore())) {
@@ -184,11 +187,11 @@ export class Scheduler {
           current <= begin + Number(booking.limitSignBack || 0);
         if (!available || !booking.id) continue;
         await this.auth.client.action("checkIn", String(booking.id));
-        writeAudit("checkin_succeeded", { bookingId: String(booking.id) });
+        this.audit("checkin_succeeded", { bookingId: String(booking.id) });
       }
     } catch (error) {
       this.statusValue.lastMessage = String(error);
-      writeAudit("checkin_failed", { error: String(error) });
+      this.audit("checkin_failed", { error: String(error) });
     } finally {
       release();
     }
