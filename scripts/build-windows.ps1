@@ -13,7 +13,7 @@ foreach ($tool in "bun", "cargo") {
 bun install --frozen-lockfile
 if ($LASTEXITCODE -ne 0) { throw "bun install failed" }
 # No updater signing key locally: skip updater artifacts. Output both MSI and NSIS setup.exe.
-bun run tauri build --bundles msi,nsis --config '{\"bundle\":{\"createUpdaterArtifacts\":false}}'
+bun run tauri build --bundles msi,nsis --config src-tauri/tauri.local.conf.json
 if ($LASTEXITCODE -ne 0) { throw "tauri build failed" }
 
 $out = Join-Path (Get-Location) "installer"
