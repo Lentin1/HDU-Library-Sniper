@@ -66,6 +66,19 @@ for (const statement of [
   "ALTER TABLE session ADD COLUMN password TEXT NOT NULL DEFAULT ''",
   "ALTER TABLE plans ADD COLUMN account_id TEXT NOT NULL DEFAULT ''",
   "ALTER TABLE audit ADD COLUMN account_id TEXT NOT NULL DEFAULT ''",
+  // 兼容更早版本遗留的、列不全的 session / accounts 表。
+  "ALTER TABLE session ADD COLUMN cookies TEXT NOT NULL DEFAULT '[]'",
+  "ALTER TABLE session ADD COLUMN uid TEXT NOT NULL DEFAULT ''",
+  "ALTER TABLE session ADD COLUMN name TEXT NOT NULL DEFAULT ''",
+  "ALTER TABLE accounts ADD COLUMN uid TEXT NOT NULL DEFAULT ''",
+  "ALTER TABLE accounts ADD COLUMN name TEXT NOT NULL DEFAULT ''",
+  "ALTER TABLE accounts ADD COLUMN student_id TEXT NOT NULL DEFAULT ''",
+  "ALTER TABLE accounts ADD COLUMN password TEXT NOT NULL DEFAULT ''",
+  "ALTER TABLE accounts ADD COLUMN cookies TEXT NOT NULL DEFAULT '[]'",
+  "ALTER TABLE accounts ADD COLUMN auto_checkin INTEGER NOT NULL DEFAULT 0",
+  "ALTER TABLE accounts ADD COLUMN checkin_consented_at TEXT",
+  "ALTER TABLE accounts ADD COLUMN created_at TEXT NOT NULL DEFAULT ''",
+  "ALTER TABLE accounts ADD COLUMN updated_at TEXT NOT NULL DEFAULT ''",
 ]) {
   try { db.exec(statement); } catch { /* column already exists */ }
 }
