@@ -39,7 +39,7 @@ export function createApi(accounts: AccountManager) {
     }
     // 跨账户的审计流：桌面通知需要看到所有账户的结果。
     if (url.pathname === "/api/audit" && request.method === "GET" && url.searchParams.get("scope") === "all") {
-      return json({ events: listAudit(Number(url.searchParams.get("limit")) || 20, accountId) });
+      return json({ events: listAudit(Number(url.searchParams.get("limit")) || 20) });
     }
 
     // ---- 以下接口作用于当前账户（X-Account-Id 请求头或 accountId 查询参数） ----
