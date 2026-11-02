@@ -336,6 +336,8 @@ export class BookingExecutor {
     const deadline = Date.now() + (options.timeoutMs ?? burstTimeoutMs);
     for (;;) {
       const result = await this.run(dryRun, { audit: false });
+      // 该账户没有启用的方案：无需在 10 分钟窗口内反复空转。
+      if (!result.planId && result.message === "没有启用的预约方案") return result;
       const terminal = result.members.some((member) => member.terminal);
       if (result.success || terminal || Date.now() >= deadline) {
         // burst 只产生一条结果审计，避免逐次重试刷屏通知。

@@ -45,8 +45,8 @@ function makeClient(handler: (path: string) => unknown) {
 
 function seedPlan(db: import("bun:sqlite").Database): void {
   db.query(
-    "INSERT INTO plans(id,kind,room_type,room_query,floor_id,floor_name,seat_num,fallback_seats,start_hour,duration_hours,weekdays,enabled,created_at,updated_at) "
-    + "VALUES('plan-1','single','自习室','q',1559,'六楼','130','[]',7,15,'[1,2,3,4,5,6,7]',1,'now','now')",
+    "INSERT INTO plans(id,kind,room_type,room_query,floor_id,floor_name,seat_num,fallback_seats,start_hour,duration_hours,weekdays,enabled,created_at,updated_at,account_id) "
+    + "VALUES('plan-1','single','自习室','q',1559,'六楼','130','[]',7,15,'[1,2,3,4,5,6,7]',1,'now','now','default')",
   ).run();
 }
 
